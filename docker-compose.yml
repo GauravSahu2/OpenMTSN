@@ -1,0 +1,114 @@
+# ══════════════════════════════════════════════════════════
+# OpenMTSN — Full Simulation Sandbox
+# ══════════════════════════════════════════════════════════
+# Launch: docker compose up -d
+# Dashboard: http://localhost:5173
+# API Docs:  http://localhost:8000/docs
+
+services:
+  # ── MQTT Broker (Eclipse Mosquitto) ─────────────────
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: mtsn-mqtt
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./simulator/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Redis (State Store) ─────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: mtsn-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── FastAPI Control Plane ───────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: mtsn-api
+    ports:
+      - "8000:8000"
+    environment:
+      MTSN_REDIS_URL: "redis://redis:6379/0"
+      MTSN_LOG_LEVEL: "INFO"
+      MTSN_CORS_ORIGINS: '["http://localhost:5173","http://localhost:80"]'
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── React Command Center Dashboard ─────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: mtsn-dashboard
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ── Simulated Edge Agent: node-alpha ────────────────
+  node-alpha:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: mtsn-node-alpha
+    environment:
+      MTSN_NODE_ID: "node-alpha"
+      MTSN_MQTT_HOST: "mqtt-broker"
+      MTSN_MQTT_PORT: "1883"
+      MTSN_GPS_LAT: "28.6139"
+      MTSN_GPS_LON: "77.2090"
+    depends_on:
+      - mqtt-broker
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN    # Required for chaos testing with tc
+
+  # ── Simulated Edge Agent: node-beta ─────────────────
+  node-beta:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: mtsn-node-beta
+    environment:
+      MTSN_NODE_ID: "node-beta"
+      MTSN_MQTT_HOST: "mqtt-broker"
+      MTSN_MQTT_PORT: "1883"
+      MTSN_GPS_LAT: "34.0522"
+      MTSN_GPS_LON: "-118.2437"
+    depends_on:
+      - mqtt-broker
+    restart: unless-stopped
+
+  # ── Simulated Edge Agent: node-gamma ────────────────
+  node-gamma:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: mtsn-node-gamma
+    environment:
+      MTSN_NODE_ID: "node-gamma"
+      MTSN_MQTT_HOST: "mqtt-broker"
+      MTSN_MQTT_PORT: "1883"
+      MTSN_GPS_LAT: "-33.8688"
+      MTSN_GPS_LON: "151.2093"
+    depends_on:
+      - mqtt-broker
+    restart: unless-stopped
