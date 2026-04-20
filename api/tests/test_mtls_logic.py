@@ -1,8 +1,11 @@
 import asyncio
 from unittest.mock import MagicMock
+
 import pytest
-from app.main import get_client_identity
 from fastapi import Request
+
+from app.main import get_client_identity
+
 
 @pytest.mark.asyncio
 async def test_identity_extraction_mock():

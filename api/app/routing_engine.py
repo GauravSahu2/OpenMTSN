@@ -40,9 +40,9 @@ def _compute_health_score(telemetry: TelemetryPayload) -> float:
     A score of 1.0 represents a perfect connection; 0.0 is unusable.
 
     Scoring methodology:
-      • signal_strength: Directly normalised from 0–100 → 0.0–1.0
-      • packet_loss: Inverted (0 % loss → 1.0, 100 % loss → 0.0)
-      • latency_ms: Mapped through a decay function capped at 500 ms
+      • signal_strength: Normalised from 0-100 -> 0.0-1.0
+      • packet_loss: Inverted (0% loss -> 1.0, 100% loss -> 0.0)
+      • latency_ms: Mapped through a decay function capped at 500ms
     """
     signal_score = telemetry.signal_strength / 100.0
     loss_score = 1.0 - (telemetry.packet_loss / 100.0)
@@ -58,11 +58,10 @@ def _compute_health_score(telemetry: TelemetryPayload) -> float:
 
 def _needs_failover(telemetry: TelemetryPayload) -> bool:
     """Determine whether telemetry values breach critical thresholds."""
-    if telemetry.packet_loss > settings.PACKET_LOSS_FAILOVER_THRESHOLD:
-        return True
-    if telemetry.signal_strength < settings.SIGNAL_STRENGTH_FAILOVER_THRESHOLD:
-        return True
-    return False
+    return (
+        telemetry.packet_loss > settings.PACKET_LOSS_FAILOVER_THRESHOLD
+        or telemetry.signal_strength < settings.SIGNAL_STRENGTH_FAILOVER_THRESHOLD
+    )
 
 
 def _select_best_uplink(
@@ -127,7 +126,8 @@ def calculate_optimal_route(
     # Failover trigger uses the EFFECTIVE (averaged) health to check thresholds
     # but hard failures (packet loss > 50%) should still trigger instantly
     is_critical_failure = telemetry_data.packet_loss > 50.0
-    should_failover = _needs_failover(telemetry_data) if not history else (effective_health < 0.4 or is_critical_failure)
+    history_threshold = (effective_health < 0.4 or is_critical_failure)
+    should_failover = _needs_failover(telemetry_data) if not history else history_threshold
 
     if should_failover:
         recommended_uplink, reason = _select_best_uplink(
@@ -158,8 +158,9 @@ def calculate_optimal_route(
         )
 
     # Check for latency warning (informational)
-    if telemetry_data.latency_ms > settings.LATENCY_WARNING_THRESHOLD_MS and not should_failover:
-        reason += f" [WARN: latency {telemetry_data.latency_ms}ms exceeds {settings.LATENCY_WARNING_THRESHOLD_MS}ms threshold]"
+    lat_warn = (telemetry_data.latency_ms > settings.LATENCY_WARNING_THRESHOLD_MS)
+    if lat_warn and not should_failover:
+        reason += f" [WARN: latency {telemetry_data.latency_ms}ms over threshold]"
 
     return RouteDecision(
         target_node=node_id,

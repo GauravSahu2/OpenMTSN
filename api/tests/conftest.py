@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import fakeredis.aioredis
 import pytest
@@ -54,7 +54,7 @@ def healthy_5g_telemetry() -> TelemetryPayload:
         signal_strength=85,
         packet_loss=2.0,
         latency_ms=15.0,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -68,7 +68,7 @@ def degraded_cellular_telemetry() -> TelemetryPayload:
         signal_strength=45,
         packet_loss=22.0,
         latency_ms=180.0,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -82,7 +82,7 @@ def weak_signal_telemetry() -> TelemetryPayload:
         signal_strength=18,
         packet_loss=8.0,
         latency_ms=90.0,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -96,7 +96,7 @@ def high_latency_satellite() -> TelemetryPayload:
         signal_strength=60,
         packet_loss=5.0,
         latency_ms=350.0,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -110,5 +110,5 @@ def all_degraded_mesh_telemetry() -> TelemetryPayload:
         signal_strength=12,
         packet_loss=45.0,
         latency_ms=400.0,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )

@@ -6,17 +6,12 @@ and edge conditions. They are the primary mutation testing target.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-import pytest
-
 from app.models import TelemetryPayload, UplinkType
 from app.routing_engine import (
     _compute_health_score,
     _needs_failover,
     calculate_optimal_route,
 )
-
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Health Score Tests

@@ -1,4 +1,5 @@
 import pytest
+
 from app.models import TelemetryPayload, UplinkType
 from app.routing_engine import calculate_optimal_route
 
@@ -46,11 +47,11 @@ def test_hysteresis_prevents_flapping():
         packet_loss=5.0,
         latency_ms=50.0
     )
-    
+
     # 1. Test WITHOUT history (instant failover)
     decision_no_hist = calculate_optimal_route("flaky-node", payload, history=None)
     assert decision_no_hist.should_failover is True
-    
+
     # 2. Test WITH healthy history (should NOT failover yet)
     # History of perfect scores [1.0, 1.0, 1.0]
     # Current health for signal=25 is roughly 0.65 ? (0.3*0.25 + 0.4*0.95 + 0.3*0.9)
@@ -69,7 +70,7 @@ def test_critical_failure_triggers_instantly_despite_history():
         packet_loss=60.0,  # Critical failure (>50%)
         latency_ms=50.0
     )
-    
+
     # Even with perfect history, 60% loss should trigger failover
     decision = calculate_optimal_route("dead-node", payload, history=[1.0, 1.0])
     assert decision.should_failover is True

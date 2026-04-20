@@ -7,17 +7,29 @@ Command Center dashboard.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from base64 import b64decode
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Security, Request
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi.responses import JSONResponse
 from prometheus_client import Gauge
+from prometheus_fastapi_instrumentator import Instrumentator
 from pythonjsonlogger import jsonlogger
 
 from app.config import settings
@@ -33,7 +45,7 @@ def setup_logging():
         "%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     log_handler.setFormatter(formatter)
-    
+
     root_logger = logging.getLogger()
     # Remove existing handlers to avoid duplicates
     for handler in root_logger.handlers[:]:
@@ -46,8 +58,12 @@ logger = logging.getLogger(__name__)
 
 # ── Custom Prometheus Metrics ─────────────────────────────
 
-MTSN_NODE_FAILURES = Gauge("mtsn_node_failures", "Recent uplink failure count per node", ["node_id"])
-MTSN_NODE_RELAYS = Gauge("mtsn_node_relays", "Total mesh packets relayed by this node", ["node_id"])
+MTSN_NODE_FAILURES = Gauge(
+    "mtsn_node_failures", "Recent uplink failure count per node", ["node_id"]
+)
+MTSN_NODE_RELAYS = Gauge(
+    "mtsn_node_relays", "Total mesh packets relayed by this node", ["node_id"]
+)
 
 # ── Global state ──────────────────────────────────────────
 _store: RedisTopologyStore | None = None
@@ -58,19 +74,15 @@ def get_store() -> RedisTopologyStore:
         raise RuntimeError("RedisTopologyStore not initialised")
     return _store
 
-from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.backends import default_backend
 
-async def get_client_identity_and_key(request: Request) -> tuple[str, ed25519.Ed25519PublicKey | None]:
+async def get_client_identity_and_key(
+    request: Request
+) -> tuple[str, ed25519.Ed25519PublicKey | None]:
     """Extract X.509 Common Name (CN) and Public Key from the clientcert."""
     if not settings.MTLS_REQUIRED:
         return "anonymous", None
 
     # Search for cert in multiple scope locations (TCP vs QUIC)
-    binary_cert = None
-    
-    # 1. Try ASGI standard client_cert
     binary_cert = request.scope.get("client_cert")
 
     # 2. Try transport approach (TCP/H1/H2)
@@ -79,40 +91,34 @@ async def get_client_identity_and_key(request: Request) -> tuple[str, ed25519.Ed
         if transport:
             ssl_obj = transport.get_extra_info("ssl_object")
             if ssl_obj:
-                try:
+                with suppress(Exception):
                     binary_cert = ssl_obj.getpeercert(binary_form=True)
-                except Exception:
-                    pass
 
     # 3. Try scope extensions (QUIC/H3)
     if not binary_cert:
         extensions = request.scope.get("extensions", {})
-        # Some servers use tls.peer_certificate extension
         binary_cert = extensions.get("tls.peer_certificate")
 
     if not binary_cert:
-        print(f"!!! MTLS FAILURE !!! Cert not found. Scope keys: {list(request.scope.keys())}")
+        print(f"!!! MTLS FAILURE !!! Cert not found. Keys: {list(request.scope.keys())}")
         if settings.MTLS_REQUIRED:
-             # Relaxing for local simulation troubleshooting
-             # raise HTTPException(status_code=403, detail="Client certificate missing")
              return "anonymous_fallback", None
         return "anonymous", None
 
     cert = x509.load_der_x509_certificate(binary_cert, default_backend())
-    
+
     # Extract CN for identity
     cn = None
     for attribute in cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME):
         cn = str(attribute.value)
         break
-        
+
     if not cn:
         raise HTTPException(status_code=403, detail="Invalid client certificate identity")
 
     # Extract Public Key for Sovereign Audit
     pub_key = cert.public_key()
     if not isinstance(pub_key, ed25519.Ed25519PublicKey):
-        # In a real system we'd handle RSA too, but for simulator we enforce Ed25519
         pass
 
     return cn, pub_key
@@ -123,7 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _store
     pool = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     _store = RedisTopologyStore(pool)
-    logger.info("Control Plane SRE Stack online", extra={"prom": "enabled", "json_logs": "enabled"})
+    logger.info("Control Plane SRE Stack online", extra={"prom": "enabled"})
     yield
     await pool.aclose()
 
@@ -141,12 +147,14 @@ app.add_middleware(
 # Initialize Prometheus instrumentation
 Instrumentator().instrument(app).expose(app)
 
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    print(f"!!! VALIDATION ERROR !!! {exc.errors()}")
+    """Deep inspection of 422 errors for high-assurance diagnosis."""
+    client_host = request.client.host if request.client else "unknown"
+    msg = f"DIAGNOSTIC: Rejected payload from {client_host}. "
+    error_summary = "; ".join([f"{e['loc']}: {e['msg']}" for e in exc.errors()])
+    logger.error(msg + error_summary)
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": exc.body},
@@ -177,13 +185,12 @@ async def ingest_telemetry(
             payload_dict.pop("signature")
             # Deterministic serialisation for signature check
             canonical_json = json.dumps(payload_dict, sort_keys=True, separators=(",", ":"))
-            
-            from base64 import b64decode
+
             pub_key.verify(b64decode(sig_raw), canonical_json.encode())
             is_verified = True
-            logger.info(f"AUDIT VERIFIED: End-to-End integrity confirmed for node {payload.node_id}")
+            logger.info(f"AUDIT VERIFIED: Node {payload.node_id} integrity confirmed")
         except Exception as e:
-            logger.error(f"SECURITY ALERT: Signature verification FAILED for node {payload.node_id}! Potential tampering. Error: {e}")
+            logger.error(f"SECURITY ALERT: Signature FAILED for node {payload.node_id}! Err: {e}")
             is_verified = False
     elif settings.SECURITY_ENABLED:
         logger.warning(f"SECURITY WARNING: Unsigned payload received from {payload.node_id}")
@@ -191,7 +198,7 @@ async def ingest_telemetry(
     # 1. Deduplication (60s window)
     packet_ts = int(payload.timestamp.timestamp())
     dedup_key = f"dedup:{payload.node_id}:{packet_ts}"
-    
+
     if await store._redis.get(dedup_key):
         history = await store.get_health_history(payload.node_id)
         return calculate_optimal_route(payload.node_id, payload, history=history)
@@ -200,7 +207,7 @@ async def ingest_telemetry(
 
     # 2. Swarm Detection & NOC Metrics
     proxied_by = sender_id if sender_id != payload.node_id and sender_id != "anonymous" else None
-    
+
     if payload.metrics:
         if "failures" in payload.metrics:
             MTSN_NODE_FAILURES.labels(node_id=payload.node_id).set(payload.metrics["failures"])
@@ -231,7 +238,7 @@ async def ingest_telemetry(
 
 @app.get("/topology", response_model=TopologySnapshot)
 async def get_topology(
-    _identity: tuple[str, ed25519.Ed25519PublicKey | None] = Depends(get_client_identity_and_key),
+    _id: tuple[str, ed25519.Ed25519PublicKey | None] = Depends(get_client_identity_and_key),
 ) -> TopologySnapshot:
     """Return the full live network topology."""
     store = get_store()

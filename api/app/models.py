@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
 
 
-class UplinkType(str, Enum):
+class UplinkType(StrEnum):
     """Supported uplink transport types."""
 
     FIVEG = "5g"
@@ -21,7 +21,7 @@ class UplinkType(str, Enum):
 class TelemetryPayload(BaseModel):
     """Telemetry packet ingested from an edge agent."""
 
-    node_id: Annotated[str, Field(min_length=1, max_length=64, description="Unique node identifier")]
+    node_id: Annotated[str, Field(min_length=1, max_length=64, description="Node identifier")]
     gps: Annotated[
         tuple[float, float],
         Field(default=(28.6139, 77.2090), description="GPS coordinates (latitude, longitude)"),
@@ -39,12 +39,12 @@ class TelemetryPayload(BaseModel):
         float,
         Field(ge=0.0, description="Round-trip latency in milliseconds"),
     ]
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    proxied_by: str | None = Field(default=None, description="ID of the node that relayed this packet")
-    metrics: dict[str, float] | None = Field(default=None, description="Agent-side health metrics (piggybacked)")
-    priority: int = Field(default=0, ge=0, le=5, description="Tactical priority (0=Bulk, 5=Critical)")
-    is_jammed: bool = Field(default=False, description="Whether the node is experiencing electronic jamming")
-    signature: str | None = Field(default=None, description="Base64 encoded Ed25519 or RSA signature")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    proxied_by: str | None = Field(default=None, description="Relay node ID")
+    metrics: dict[str, float] | None = Field(default=None, description="Health metrics")
+    priority: int = Field(default=0, ge=0, le=5, description="Priority (0-5)")
+    is_jammed: bool = Field(default=False, description="Electronic jamming active")
+    signature: str | None = Field(default=None, description="Ed25519 or RSA signature")
 
     @field_validator("gps")
     @classmethod
@@ -84,7 +84,7 @@ class RouteDecision(BaseModel):
     reason: str
     confidence_score: Annotated[
         float,
-        Field(ge=0.0, le=1.0, description="Confidence in the routing decision (0.0–1.0)"),
+        Field(ge=0.0, le=1.0, description="Routing confidence (0.0-1.0)"),
     ]
 
 
@@ -94,4 +94,4 @@ class TopologySnapshot(BaseModel):
     nodes: list[NodeState]
     total_healthy: int
     total_degraded: int
-    snapshot_time: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    snapshot_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
