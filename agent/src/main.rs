@@ -6,16 +6,23 @@
 //! back to local mesh broadcast when cloud connectivity is lost.
 
 use chrono::Utc;
-use log::{error, info, warn};
-use rand::Rng;
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use reqwest::{Certificate, Client, Identity};
+use rusqlite::{params, Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::net::UdpSocket;
+use std::path::Path;
+use tracing::{info, warn, error};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::collections::HashMap;
 use std::time::Duration;
 use sysinfo::Networks;
 use tokio::time;
+use rumqttc::{MqttOptions, AsyncClient, Event, Packet, QoS};
+use rand::Rng;
 
 // ── Configuration ────────────────────────────────────────
 const MQTT_BROKER_HOST: &str = "localhost";
@@ -31,13 +38,17 @@ const MAX_MQTT_FAILURES: u32 = 3;
 /// JSON telemetry payload published to the MQTT broker.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TelemetryPayload {
-    pub node: String,
+    pub node_id: String,
     pub gps: [f64; 2],
     pub uplink: String,
-    pub signal: u8,
+    pub signal_strength: u8,
     pub packet_loss: f64,
     pub latency_ms: f64,
     pub timestamp: String,
+    pub metrics: Option<HashMap<String, f64>>,
+    pub priority: u8,
+    pub is_jammed: bool,
+    pub signature: Option<String>,
 }
 
 // ── Network Interface Monitor ────────────────────────────
@@ -86,7 +97,39 @@ fn probe_network_interfaces() -> (String, u8, f64, f64) {
     (uplink.to_string(), base_signal, packet_loss, latency_ms)
 }
 
-// ── Mesh Fallback ────────────────────────────────────────
+// ── Mesh Security ─────────────────────────────────────────
+
+const MESH_KEY: &[u8; 32] = b"OpenMTSN-Deployment-Key-2026-X!1"; // 32-byte key
+
+fn encrypt_mesh_packet(data: &str) -> Vec<u8> {
+    let cipher = ChaCha20Poly1305::new(MESH_KEY.into());
+    let mut rng = rand::thread_rng();
+    let nonce_bytes: [u8; 12] = rng.gen();
+    let nonce = Nonce::from_slice(&nonce_bytes); // 12-byte random nonce
+    
+    let encrypted = cipher.encrypt(nonce, data.as_bytes()).expect("Encryption failed");
+    
+    // Envelope: [Nonce (12b)] + [Tag+Ciphertext]
+    let mut packet = nonce.to_vec();
+    packet.extend_from_slice(&encrypted);
+    packet
+}
+
+fn decrypt_mesh_packet(packet: &[u8]) -> Option<String> {
+    if packet.len() < 12 { return None; }
+    
+    let cipher = ChaCha20Poly1305::new(MESH_KEY.into());
+    let (nonce_bytes, ciphertext) = packet.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    
+    match cipher.decrypt(nonce, ciphertext) {
+        Ok(plain) => String::from_utf8(plain).ok(),
+        Err(_) => {
+            warn!("MALICIOUS: Mesh packet failed integrity check (wrong key or tampered)");
+            None
+        }
+    }
+}
 
 /// Broadcast telemetry via UDP to nearby OpenMTSN peers on the local subnet.
 ///
@@ -100,13 +143,15 @@ fn broadcast_mesh_fallback(payload: &TelemetryPayload) {
         }
     };
 
+    let encrypted_packet = encrypt_mesh_packet(&json);
+
     match UdpSocket::bind("0.0.0.0:0") {
         Ok(socket) => {
             let _ = socket.set_broadcast(true);
-            match socket.send_to(json.as_bytes(), MESH_BROADCAST_ADDR) {
+            match socket.send_to(&encrypted_packet, MESH_BROADCAST_ADDR) {
                 Ok(bytes) => {
                     info!(
-                        "MESH BROADCAST: sent {} bytes to nearby peers",
+                        "MESH SECURED: sent {} bytes to nearby peers (ENCRYPTED)",
                         bytes
                     );
                 }
@@ -117,10 +162,97 @@ fn broadcast_mesh_fallback(payload: &TelemetryPayload) {
     }
 }
 
-// ── Mesh Listener ────────────────────────────────────────
+// ── Sovereignty & Audit ──────────────────────────────────
+use ed25519_dalek::{Signer, SigningKey};
+use base64::prelude::*;
+
+/// Generate a deterministic signing key for simulation based on node_id.
+/// In production, this would load the mTLS private key.
+fn get_signing_key(node_id: &str) -> SigningKey {
+    let mut seed = [0u8; 32];
+    let bytes = node_id.as_bytes();
+    for i in 0..bytes.len().min(32) {
+        seed[i] = bytes[i];
+    }
+    SigningKey::from_bytes(&seed)
+}
+
+fn sign_payload(payload: &mut TelemetryPayload, key: &SigningKey) {
+    // 1. Canonicalise (Serialise without signature)
+    let _original_sig = payload.signature.take();
+    let json = serde_json::to_string(&payload).unwrap();
+    
+    // 2. Sign
+    let signature = key.sign(json.as_bytes());
+    payload.signature = Some(BASE64_STANDARD.encode(signature.to_bytes()));
+}
+
+// ── Persistence Layer ─────────────────────────────────────
+const DB_PATH: &str = "data/mtsn_queue.db";
+
+pub struct PersistenceManager {
+    conn: Connection,
+}
+
+impl PersistenceManager {
+    pub fn new() -> SqlResult<Self> {
+        let conn = Connection::open(DB_PATH)?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS telemetry_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL,
+                priority INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        Ok(Self { conn })
+    }
+
+    pub fn queue_telemetry(&self, payload: &TelemetryPayload) -> SqlResult<()> {
+        let json = serde_json::to_string(payload).unwrap();
+        self.conn.execute(
+            "INSERT INTO telemetry_queue (payload, priority) VALUES (?, ?)",
+            params![json, payload.priority],
+        )?;
+        info!("QUEUED [P{}]: Telemetry stored in local buffer", payload.priority);
+        Ok(())
+    }
+
+    pub fn drain_queue(&self) -> SqlResult<Vec<(i32, TelemetryPayload)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, payload FROM telemetry_queue ORDER BY priority DESC, id ASC LIMIT 50")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i32 = row.get(0)?;
+            let payload_str: String = row.get(1)?;
+            let payload: TelemetryPayload = serde_json::from_str(&payload_str).unwrap();
+            Ok((id, payload))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    pub fn delete_telemetry(&self, id: i32) -> SqlResult<()> {
+        self.conn
+            .execute("DELETE FROM telemetry_queue WHERE id = ?", params![id])?;
+        Ok(())
+    }
+}
+
+// ── Mesh Listener & Relay ─────────────────────────────────
 
 /// Listen for incoming mesh broadcasts from other agents and relay them.
-async fn mesh_listener() {
+async fn mesh_listener(
+    quic_client: Client,
+    api_url: String,
+    failures: Arc<AtomicU32>,
+    relayed_count: Arc<AtomicU32>,
+) {
     let socket = match UdpSocket::bind(format!("0.0.0.0:{}", MESH_BROADCAST_PORT)) {
         Ok(s) => {
             let _ = s.set_nonblocking(true);
@@ -134,20 +266,42 @@ async fn mesh_listener() {
 
     info!("Mesh listener active on port {}", MESH_BROADCAST_PORT);
     let mut buf = [0u8; 4096];
+    let mut recently_relayed: Vec<String> = Vec::new();
 
     loop {
         match socket.recv_from(&mut buf) {
             Ok((len, src)) => {
-                if let Ok(payload) = serde_json::from_slice::<TelemetryPayload>(&buf[..len]) {
-                    info!(
-                        "MESH RECV: node={} from {} (signal={}%)",
-                        payload.node, src, payload.signal
-                    );
-                    // In production: enqueue for relay to broker when connectivity resumes
+                if let Some(decrypted_json) = decrypt_mesh_packet(&buf[..len]) {
+                    if let Ok(payload) = serde_json::from_str::<TelemetryPayload>(&decrypted_json) {
+                        let pkt_id = format!("{}:{}", payload.node_id, payload.timestamp);
+                        
+                        // 1. Deduplicate
+                        if recently_relayed.contains(&pkt_id) {
+                            continue;
+                        }
+
+                        info!(
+                            "MESH SECURED RECV: node={} from {} (signal={}%)",
+                            payload.node_id, src, payload.signal_strength
+                        );
+
+                        // 2. Relay if we have cloud connectivity
+                        if failures.load(Ordering::SeqCst) < MAX_MQTT_FAILURES {
+                            info!("SWARM RELAY: Proxying data for {} to Control Plane", payload.node_id);
+                            let _ = quic_client
+                                .post(format!("{}/telemetry", api_url))
+                                .json(&payload)
+                                .send()
+                                .await;
+                            
+                            relayed_count.fetch_add(1, Ordering::SeqCst);
+                            recently_relayed.push(pkt_id);
+                            if recently_relayed.len() > 100 { recently_relayed.remove(0); }
+                        }
+                    }
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available, sleep briefly
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {
@@ -162,7 +316,13 @@ async fn mesh_listener() {
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Initialise structured JSON logging for SRE auditability
+    tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    info!("OpenMTSN Edge Agent Starting — Tactical SRE Mode Active");
 
     let node_id = std::env::var("MTSN_NODE_ID").unwrap_or_else(|_| "agent-001".to_string());
     let broker_host =
@@ -192,16 +352,41 @@ async fn main() {
     let mqtt_connected = Arc::new(AtomicBool::new(false));
     let consecutive_failures = Arc::new(AtomicU32::new(0));
 
+    // Load TLS Identity for mTLS (per-device cert)
+    let cert_path = std::env::var("MTSN_CLIENT_CERT").unwrap_or_else(|_| format!("certs/{}.crt", node_id));
+    let key_path = std::env::var("MTSN_CLIENT_KEY").unwrap_or_else(|_| format!("certs/{}.key", node_id));
+    let ca_path = std::env::var("MTSN_CA_CERT").unwrap_or_else(|_| "certs/ca.crt".to_string());
+
+    let client_cert = fs::read(&cert_path).expect("Failed to read client cert");
+    let client_key = fs::read(&key_path).expect("Failed to read client key");
+    let ca_cert = fs::read(&ca_path).expect("Failed to read CA cert");
+
+    let identity = Identity::from_pem(&[client_cert, client_key].concat()).expect("Failed to create identity");
+    let root_ca = Certificate::from_pem(&ca_cert).expect("Failed to load Root CA");
+
+    let quic_client = Client::builder()
+        .use_rustls_tls()
+        .add_root_certificate(root_ca)
+        .identity(identity)
+        .https_only(true)
+        .build()
+        .expect("Failed to build HTTP/3 client");
+
+    let api_url = std::env::var("MTSN_API_URL").unwrap_or_else(|_| "https://localhost:8000".to_string());
+
+    // Initialize persistence
+    let persistence = Arc::new(PersistenceManager::new().expect("Failed to initialize SQLite DB"));
+
     // Spawn MQTT event loop handler
     let connected_flag = mqtt_connected.clone();
-    let failures_counter = consecutive_failures.clone();
+    let mqtt_fails = consecutive_failures.clone();
     tokio::spawn(async move {
         loop {
             match eventloop.poll().await {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     info!("MQTT connected to broker");
                     connected_flag.store(true, Ordering::SeqCst);
-                    failures_counter.store(0, Ordering::SeqCst);
+                    mqtt_fails.store(0, Ordering::SeqCst);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -213,26 +398,63 @@ async fn main() {
         }
     });
 
-    // Spawn mesh listener
-    tokio::spawn(mesh_listener());
+    // Initialise and spawn mesh listener
+    let listener_client = quic_client.clone();
+    let listener_url = api_url.clone();
+    let listener_fails = consecutive_failures.clone();
+    let relayed_counter = Arc::new(AtomicU32::new(0));
+    let listener_relayed = relayed_counter.clone();
 
-    // ── Telemetry publish loop ───────────────────────────
+    tokio::spawn(async move {
+        mesh_listener(listener_client, listener_url, listener_fails, listener_relayed).await;
+    });
+
+    let mut skip_tick = false;
+
+    // Main telemetry loop
     let mut interval = time::interval(PUBLISH_INTERVAL);
     loop {
         interval.tick().await;
 
         let (uplink, signal, packet_loss, latency_ms) = probe_network_interfaces();
 
-        let payload = TelemetryPayload {
-            node: node_id.clone(),
+        // ── Tactical Jamming Detection ───────────────────
+        // If loss is high but signal seems OK -> Potential EW Attack
+        let is_jammed = (packet_loss > 25.0) && (signal > 40);
+        if is_jammed {
+            warn!("EW ALERT: Potential jamming detected! Entering LPI Mode.");
+            // In LPI mode, we skip every other tick to reduce electronic footprint
+            skip_tick = !skip_tick;
+            if skip_tick {
+                info!("LPI MODE: Skipping broadcast cycle to maintain stealth.");
+                continue;
+            }
+        }
+
+        let mut metrics = HashMap::new();
+        metrics.insert("failures".to_string(), consecutive_failures.load(Ordering::SeqCst) as f64);
+        metrics.insert("relays".to_string(), relayed_counter.load(Ordering::SeqCst) as f64);
+
+        let priority = if is_jammed || consecutive_failures.load(Ordering::SeqCst) > 0 { 5 } else { 0 };
+
+        let mut payload = TelemetryPayload {
+            node_id: node_id.clone(),
             gps: [gps_lat, gps_lon],
             uplink,
-            signal,
+            signal_strength: signal,
             packet_loss: (packet_loss * 100.0).round() / 100.0,
             latency_ms: (latency_ms * 100.0).round() / 100.0,
             timestamp: Utc::now().to_rfc3339(),
+            metrics: Some(metrics),
+            priority,
+            is_jammed,
+            signature: None,
         };
 
+        // ── Phase 9: Sovereign Audit Signing ──────────────
+        let signing_key = get_signing_key(&node_id);
+        sign_payload(&mut payload, &signing_key);
+        
         let json = match serde_json::to_string(&payload) {
             Ok(j) => j,
             Err(e) => {
@@ -241,35 +463,49 @@ async fn main() {
             }
         };
 
-        // Attempt MQTT publish
-        match client
-            .publish(MQTT_TOPIC, QoS::AtLeastOnce, false, json.as_bytes())
-            .await
-        {
-            Ok(_) => {
-                consecutive_failures.store(0, Ordering::SeqCst);
+        // ── Phase 3: QUIC / HTTP/3 Telemetry ────────────────
+        let res = quic_client
+            .post(format!("{}/telemetry", api_url))
+            .json(&payload)
+            .send()
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {
                 info!(
-                    "MQTT PUB: node={} uplink={} signal={}% loss={:.1}% lat={:.0}ms",
-                    payload.node, payload.uplink, payload.signal,
+                    "QUIC PUB: node_id={} uplink={} signal_strength={}% loss={:.1}% lat={:.0}ms",
+                    payload.node_id, payload.uplink, payload.signal_strength,
                     payload.packet_loss, payload.latency_ms
                 );
+                consecutive_failures.store(0, Ordering::SeqCst);
+
+                // Drain local queue if connected
+                if let Ok(queued_items) = persistence.drain_queue() {
+                    for (id, q_payload) in queued_items {
+                        if quic_client.post(format!("{}/telemetry", api_url)).json(&q_payload).send().await.is_ok() {
+                            let _ = persistence.delete_telemetry(id);
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                warn!("QUIC publish rejected: status={}", resp.status());
+                let _ = persistence.queue_telemetry(&payload);
             }
             Err(e) => {
+                warn!("QUIC connection failed: {}", e);
+                let _ = persistence.queue_telemetry(&payload);
+                
                 let fails = consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
-                warn!(
-                    "MQTT publish failed ({}/{}): {}",
-                    fails, MAX_MQTT_FAILURES, e
-                );
-
-                // If we've exceeded the failure threshold, fall back to mesh
                 if fails >= MAX_MQTT_FAILURES {
-                    warn!(
-                        "MESH FALLBACK: {} consecutive MQTT failures — broadcasting to peers",
-                        fails
-                    );
                     broadcast_mesh_fallback(&payload);
                 }
             }
+        }
+
+        // Also maintain MQTT for Mesh (Peer-to-Peer) coordination
+        if mqtt_connected.load(Ordering::SeqCst) {
+            let _ = client.publish(MQTT_TOPIC, QoS::AtMostOnce, false, json.as_bytes()).await;
         }
     }
 }

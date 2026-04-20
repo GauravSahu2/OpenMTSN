@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NODE_KEY_PREFIX = "node:"
+SCORE_KEY_PREFIX = "health:"
+HISTORY_WINDOW_SIZE = 5
 
 
 class RedisTopologyStore:
@@ -34,10 +36,14 @@ class RedisTopologyStore:
     async def update_node_state(
         self,
         telemetry: TelemetryPayload,
+        health_score: float,
         recommended_route: UplinkType | None = None,
         is_healthy: bool = True,
+        proxied_by: str | None = None,
+        is_under_jamming: bool = False,
+        is_verified: bool = False,
     ) -> NodeState:
-        """Upsert a node's state from incoming telemetry."""
+        """Upsert a node's state and record the health score in its history."""
         state = NodeState(
             node_id=telemetry.node_id,
             gps=telemetry.gps,
@@ -48,16 +54,33 @@ class RedisTopologyStore:
             timestamp=telemetry.timestamp,
             recommended_route=recommended_route,
             is_healthy=is_healthy,
+            proxied_by=proxied_by or telemetry.proxied_by,
+            is_under_jamming=is_under_jamming or telemetry.is_jammed,
+            is_verified=is_verified,
         )
 
         key = f"{NODE_KEY_PREFIX}{telemetry.node_id}"
         payload = state.model_dump_json()
 
         await self._redis.set(key, payload, ex=settings.REDIS_NODE_TTL_SECONDS)
-        logger.debug("Updated node state: %s", telemetry.node_id)
+
+        # Record health history
+        score_key = f"{SCORE_KEY_PREFIX}{telemetry.node_id}"
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.lpush(score_key, health_score)
+            pipe.ltrim(score_key, 0, HISTORY_WINDOW_SIZE - 1)
+            pipe.expire(score_key, settings.REDIS_NODE_TTL_SECONDS)
+            await pipe.execute()
+
+        logger.debug("Updated node state & health history: %s", telemetry.node_id)
         return state
 
     # ── Read ──────────────────────────────────────────
+
+    async def get_health_history(self, node_id: str) -> list[float]:
+        """Retrieve the moving window of health scores for a node."""
+        scores = await self._redis.lrange(f"{SCORE_KEY_PREFIX}{node_id}", 0, -1)
+        return [float(s) for s in scores]
 
     async def get_node_state(self, node_id: str) -> NodeState | None:
         """Retrieve the current state of a single node."""

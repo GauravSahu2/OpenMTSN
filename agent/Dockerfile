@@ -1,5 +1,5 @@
 # ── Stage 1: Build ────────────────────────────────────────
-FROM rust:1.78-slim AS builder
+FROM rust:latest AS builder
 
 WORKDIR /build
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
@@ -14,7 +14,8 @@ LABEL org.opencontainers.image.title="OpenMTSN Edge Agent"
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    groupadd -r mtsn && useradd -r -g mtsn mtsn
+    groupadd -r mtsn && useradd -r -g mtsn mtsn && \
+    mkdir -p /app/data && chown -R mtsn:mtsn /app
 
 WORKDIR /app
 COPY --from=builder /build/target/release/openmtsn-agent .

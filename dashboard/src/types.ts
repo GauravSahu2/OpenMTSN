@@ -12,6 +12,9 @@ export interface NodeState {
   timestamp: string;
   recommended_route: UplinkType | null;
   is_healthy: boolean;
+  proxied_by: string | null;
+  is_under_jamming: boolean;
+  is_verified: boolean;
 }
 
 export interface TopologySnapshot {

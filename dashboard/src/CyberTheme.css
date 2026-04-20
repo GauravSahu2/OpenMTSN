@@ -1,0 +1,138 @@
+:root {
+  --bg-obsidian: #05070a;
+  --bg-glass: rgba(13, 17, 23, 0.7);
+  --neon-cyan: #00f2ff;
+  --neon-amber: #ffaa00;
+  --neon-red: #ff3e3e;
+  --neon-green: #39ff14;
+  --text-dim: #90a4ae;
+  --border-glass: rgba(255, 255, 255, 0.1);
+  --glow-cyan: 0 0 10px rgba(0, 242, 255, 0.5);
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', 'Outfit', sans-serif;
+  background-color: var(--bg-obsidian);
+  color: white;
+  overflow: hidden;
+}
+
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background-image: url('/command_center_bg.webp');
+  background-size: cover;
+  background-position: center;
+  position: relative;
+}
+
+/* Glassmorphism Sidebar */
+.sidebar {
+  width: 320px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  border-right: 1px solid var(--border-glass);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+  box-shadow: 10px 0 30px rgba(0,0,0,0.5);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 30px;
+  border-bottom: 1px solid var(--border-glass);
+  padding-bottom: 15px;
+}
+
+.sidebar-header h1 {
+  font-size: 1.2rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--neon-cyan);
+  text-shadow: var(--glow-cyan);
+}
+
+/* Map Containers */
+.map-viewport {
+  flex: 1;
+  position: relative;
+  background: rgba(0,0,0,0.2);
+}
+
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+  background: transparent !important;
+}
+
+/* Node Cards */
+.node-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.node-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--neon-cyan);
+  transform: translateX(5px);
+}
+
+.node-card.degraded {
+  border-left: 3px solid var(--neon-red);
+}
+
+.node-card.healthy {
+  border-left: 3px solid var(--neon-green);
+}
+
+/* Status Badges */
+.badge {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.badge-cyan { background: rgba(0, 242, 255, 0.2); color: var(--neon-cyan); }
+.badge-red { background: rgba(255, 62, 62, 0.2); color: var(--neon-red); }
+
+/* Animations */
+@keyframes pulse-ring {
+  0% { transform: scale(0.5); opacity: 0.8; }
+  100% { transform: scale(3.5); opacity: 0; }
+}
+
+.pulse-ring {
+  position: absolute;
+  border: 2px solid var(--neon-cyan);
+  border-radius: 50%;
+  animation: pulse-ring 2s infinite;
+}
+
+.status-bar {
+  position: absolute;
+  bottom: 20px;
+  left: 340px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(8px);
+  padding: 8px 20px;
+  border-radius: 50px;
+  border: 1px solid var(--border-glass);
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  font-size: 0.85rem;
+  z-index: 100;
+}

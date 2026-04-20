@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     SIGNAL_STRENGTH_FAILOVER_THRESHOLD: int = 30
     LATENCY_WARNING_THRESHOLD_MS: float = 200.0
 
+    # ── Security ──────────────────────────────────────
+    API_KEY: str = "openmtsn-secret-key-2026"
+    DASHBOARD_SECRET: str = "dashboard-access-key-2026"
+    SECURITY_ENABLED: bool = True
+
+    # ── PKI (mTLS) ────────────────────────────────────
+    # Paths relative to the API root
+    CA_CERT_PATH: str = "/certs/ca.crt"
+    SERVER_CERT_PATH: str = "/certs/server.crt"
+    SERVER_KEY_PATH: str = "/certs/server.key"
+    MTLS_REQUIRED: bool = True
+
     model_config = {"env_prefix": "MTSN_", "env_file": ".env", "extra": "ignore"}
 
 

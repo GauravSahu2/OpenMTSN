@@ -23,4 +23,11 @@ EXPOSE 8000
 ENV MTSN_REDIS_URL="redis://redis:6379/0"
 ENV MTSN_LOG_LEVEL="INFO"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["hypercorn", "app.main:app", \
+     "--bind", "0.0.0.0:8000", \
+     "--quic-bind", "0.0.0.0:443", \
+     "--certfile", "/certs/server.crt", \
+     "--keyfile", "/certs/server.key", \
+     "--ca-certs", "/certs/ca.crt", \
+     "--verify-mode", "CERT_OPTIONAL", \
+     "--access-logfile", "-"]

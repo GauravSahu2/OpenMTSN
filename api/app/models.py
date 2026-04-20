@@ -24,7 +24,7 @@ class TelemetryPayload(BaseModel):
     node_id: Annotated[str, Field(min_length=1, max_length=64, description="Unique node identifier")]
     gps: Annotated[
         tuple[float, float],
-        Field(description="GPS coordinates (latitude, longitude)"),
+        Field(default=(28.6139, 77.2090), description="GPS coordinates (latitude, longitude)"),
     ]
     uplink: UplinkType
     signal_strength: Annotated[
@@ -40,6 +40,11 @@ class TelemetryPayload(BaseModel):
         Field(ge=0.0, description="Round-trip latency in milliseconds"),
     ]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    proxied_by: str | None = Field(default=None, description="ID of the node that relayed this packet")
+    metrics: dict[str, float] | None = Field(default=None, description="Agent-side health metrics (piggybacked)")
+    priority: int = Field(default=0, ge=0, le=5, description="Tactical priority (0=Bulk, 5=Critical)")
+    is_jammed: bool = Field(default=False, description="Whether the node is experiencing electronic jamming")
+    signature: str | None = Field(default=None, description="Base64 encoded Ed25519 or RSA signature")
 
     @field_validator("gps")
     @classmethod
@@ -64,6 +69,9 @@ class NodeState(BaseModel):
     timestamp: datetime
     recommended_route: UplinkType | None = None
     is_healthy: bool = True
+    proxied_by: str | None = None
+    is_under_jamming: bool = False
+    is_verified: bool = False
 
 
 class RouteDecision(BaseModel):

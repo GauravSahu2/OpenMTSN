@@ -107,45 +107,54 @@ def _select_best_uplink(
 def calculate_optimal_route(
     node_id: str,
     telemetry_data: TelemetryPayload,
+    history: list[float] | None = None,
 ) -> RouteDecision:
     """Evaluate telemetry and return the optimal routing decision.
 
-    This is the core function that the control plane invokes on every
-    telemetry ingestion. It:
-      1. Computes a composite health score for the current uplink.
-      2. Checks hard thresholds for immediate failover triggers.
-      3. Selects the best alternative uplink when failover is needed.
-      4. Returns a ``RouteDecision`` with a confidence score and reason.
+    This version uses a moving average (hysteresis) if history is provided
+    to prevent rapid switching (flapping) between uplinks.
     """
-    health_score = _compute_health_score(telemetry_data)
-    should_failover = _needs_failover(telemetry_data)
+    current_health = _compute_health_score(telemetry_data)
+
+    # Use moving average if history exists
+    if history:
+        # window size is len(history) + 1 (current)
+        avg_health = (sum(history) + current_health) / (len(history) + 1)
+        effective_health = round(avg_health, 4)
+    else:
+        effective_health = current_health
+
+    # Failover trigger uses the EFFECTIVE (averaged) health to check thresholds
+    # but hard failures (packet loss > 50%) should still trigger instantly
+    is_critical_failure = telemetry_data.packet_loss > 50.0
+    should_failover = _needs_failover(telemetry_data) if not history else (effective_health < 0.4 or is_critical_failure)
 
     if should_failover:
         recommended_uplink, reason = _select_best_uplink(
             telemetry_data.uplink, telemetry_data
         )
-        confidence = round(1.0 - health_score, 4)  # Higher confidence to switch when health is low
+        confidence = round(1.0 - effective_health, 4)
         logger.warning(
-            "FAILOVER node=%s | %s → %s | health=%.4f | %s",
+            "FAILOVER node=%s | %s → %s | health=%.4f (inst=%.4f) | %s",
             node_id,
             telemetry_data.uplink.value,
             recommended_uplink.value,
-            health_score,
+            effective_health,
+            current_health,
             reason,
         )
     else:
         recommended_uplink = telemetry_data.uplink
-        confidence = health_score
+        confidence = effective_health
         reason = (
-            f"Uplink '{telemetry_data.uplink.value}' healthy — no action required "
-            f"(health_score={health_score}, signal={telemetry_data.signal_strength}%, "
-            f"packet_loss={telemetry_data.packet_loss}%, latency={telemetry_data.latency_ms}ms)"
+            f"Uplink '{telemetry_data.uplink.value}' stable — no action required "
+            f"(avg_health={effective_health}, current={current_health})"
         )
         logger.info(
             "STABLE   node=%s | %s | health=%.4f",
             node_id,
             telemetry_data.uplink.value,
-            health_score,
+            effective_health,
         )
 
     # Check for latency warning (informational)
@@ -160,3 +169,8 @@ def calculate_optimal_route(
         reason=reason,
         confidence_score=confidence,
     )
+
+
+def compute_health_score(telemetry: TelemetryPayload) -> float:
+    """Public wrapper for the health score computation ∈ [0.0, 1.0]."""
+    return _compute_health_score(telemetry)
