@@ -31,7 +31,6 @@ async def test_identity_extraction_mock():
 
     from unittest.mock import patch
 
-
     # Mock the x509 parser to return a cert with Common Name 'node-alpha'
     mock_cert = MagicMock()
     mock_cn_attr = MagicMock()

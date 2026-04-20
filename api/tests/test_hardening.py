@@ -21,6 +21,7 @@ async def test_telemetry_unauthorized_without_key(test_client):
     from httpx import ASGITransport, AsyncClient
 
     import app.main as main_module
+
     transport = ASGITransport(app=main_module.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/telemetry", json=payload)

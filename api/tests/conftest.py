@@ -37,9 +37,7 @@ async def test_client(fake_redis, monkeypatch):
 
     headers = {"X-MTSN-API-Key": "openmtsn-secret-key-2026"}
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(
-        transport=transport, base_url="http://test", headers=headers
-    ) as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as client:
         yield client
 
     main_module._store = original_store
