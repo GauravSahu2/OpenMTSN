@@ -25,6 +25,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -101,9 +102,14 @@ async def get_client_identity_and_key(
         binary_cert = extensions.get("tls.peer_certificate")
 
     if not binary_cert:
-        print(f"!!! MTLS FAILURE !!! Cert not found. Keys: {list(request.scope.keys())}")
-        if settings.MTLS_REQUIRED:
-            return "anonymous_fallback", None
+        # Check for API Key fallback if mTLS is missing
+        api_key = request.headers.get("X-MTSN-API-Key")
+        if settings.SECURITY_ENABLED:
+            if api_key == settings.API_KEY:
+                return "gateway_admin", None
+            if settings.MTLS_REQUIRED:
+                raise HTTPException(status_code=403, detail="invalid mTLS cert or invalid X-MTSN-API-Key")
+
         return "anonymous", None
 
     cert = x509.load_der_x509_certificate(binary_cert, default_backend())
@@ -160,7 +166,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logger.error(msg + error_summary)
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "body": exc.body},
+        content=jsonable_encoder({"detail": exc.errors(), "body": exc.body}),
     )
 
 

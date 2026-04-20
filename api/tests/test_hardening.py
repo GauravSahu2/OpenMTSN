@@ -17,7 +17,12 @@ async def test_telemetry_unauthorized_without_key(test_client):
         "latency_ms": 50,
         "timestamp": "2026-01-01T00:00:00Z",
     }
-    response = await test_client.post("/telemetry", json=payload)
+    # Create a fresh client WITHOUT the default API key headers from conftest
+    from httpx import ASGITransport, AsyncClient
+    import app.main as main_module
+    transport = ASGITransport(app=main_module.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/telemetry", json=payload)
     assert response.status_code == 403
     assert "invalid X-MTSN-API-Key" in response.json()["detail"]
 
