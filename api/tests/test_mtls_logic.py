@@ -28,10 +28,9 @@ async def test_identity_extraction_mock():
     request = Request(scope=scope)
 
     # Execute
-    from app.config import settings
 
     from unittest.mock import patch
-    from cryptography import x509
+
 
     # Mock the x509 parser to return a cert with Common Name 'node-alpha'
     mock_cert = MagicMock()

@@ -19,6 +19,7 @@ async def test_telemetry_unauthorized_without_key(test_client):
     }
     # Create a fresh client WITHOUT the default API key headers from conftest
     from httpx import ASGITransport, AsyncClient
+
     import app.main as main_module
     transport = ASGITransport(app=main_module.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

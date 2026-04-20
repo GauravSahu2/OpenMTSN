@@ -108,7 +108,9 @@ async def get_client_identity_and_key(
             if api_key == settings.API_KEY:
                 return "gateway_admin", None
             if settings.MTLS_REQUIRED:
-                raise HTTPException(status_code=403, detail="invalid mTLS cert or invalid X-MTSN-API-Key")
+                raise HTTPException(
+                    status_code=403, detail="invalid mTLS cert or invalid X-MTSN-API-Key"
+                )
 
         return "anonymous", None
 
