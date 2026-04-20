@@ -5,24 +5,23 @@
 //! interfaces, publishes telemetry to the central MQTT broker, and falls
 //! back to local mesh broadcast when cloud connectivity is lost.
 
-use chrono::Utc;
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use chrono::Utc;
+use rand::Rng;
 use reqwest::{Certificate, Client, Identity};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::net::UdpSocket;
-use std::path::Path;
-use tracing::{info, warn, error};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::collections::HashMap;
 use std::time::Duration;
 use sysinfo::Networks;
 use tokio::time;
-use rumqttc::{MqttOptions, AsyncClient, Event, Packet, QoS};
-use rand::Rng;
+use tracing::{error, info, warn};
 
 // ── Configuration ────────────────────────────────────────
 const MQTT_BROKER_HOST: &str = "localhost";
@@ -106,9 +105,11 @@ fn encrypt_mesh_packet(data: &str) -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let nonce_bytes: [u8; 12] = rng.gen();
     let nonce = Nonce::from_slice(&nonce_bytes); // 12-byte random nonce
-    
-    let encrypted = cipher.encrypt(nonce, data.as_bytes()).expect("Encryption failed");
-    
+
+    let encrypted = cipher
+        .encrypt(nonce, data.as_bytes())
+        .expect("Encryption failed");
+
     // Envelope: [Nonce (12b)] + [Tag+Ciphertext]
     let mut packet = nonce.to_vec();
     packet.extend_from_slice(&encrypted);
@@ -116,12 +117,14 @@ fn encrypt_mesh_packet(data: &str) -> Vec<u8> {
 }
 
 fn decrypt_mesh_packet(packet: &[u8]) -> Option<String> {
-    if packet.len() < 12 { return None; }
-    
+    if packet.len() < 12 {
+        return None;
+    }
+
     let cipher = ChaCha20Poly1305::new(MESH_KEY.into());
     let (nonce_bytes, ciphertext) = packet.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
-    
+
     match cipher.decrypt(nonce, ciphertext) {
         Ok(plain) => String::from_utf8(plain).ok(),
         Err(_) => {
@@ -163,17 +166,16 @@ fn broadcast_mesh_fallback(payload: &TelemetryPayload) {
 }
 
 // ── Sovereignty & Audit ──────────────────────────────────
-use ed25519_dalek::{Signer, SigningKey};
 use base64::prelude::*;
+use ed25519_dalek::{Signer, SigningKey};
 
 /// Generate a deterministic signing key for simulation based on node_id.
 /// In production, this would load the mTLS private key.
 fn get_signing_key(node_id: &str) -> SigningKey {
     let mut seed = [0u8; 32];
     let bytes = node_id.as_bytes();
-    for i in 0..bytes.len().min(32) {
-        seed[i] = bytes[i];
-    }
+    let len = bytes.len().min(32);
+    seed[..len].copy_from_slice(&bytes[..len]);
     SigningKey::from_bytes(&seed)
 }
 
@@ -181,7 +183,7 @@ fn sign_payload(payload: &mut TelemetryPayload, key: &SigningKey) {
     // 1. Canonicalise (Serialise without signature)
     let _original_sig = payload.signature.take();
     let json = serde_json::to_string(&payload).unwrap();
-    
+
     // 2. Sign
     let signature = key.sign(json.as_bytes());
     payload.signature = Some(BASE64_STANDARD.encode(signature.to_bytes()));
@@ -191,7 +193,7 @@ fn sign_payload(payload: &mut TelemetryPayload, key: &SigningKey) {
 const DB_PATH: &str = "data/mtsn_queue.db";
 
 pub struct PersistenceManager {
-    conn: Connection,
+    conn: std::sync::Mutex<Connection>,
 }
 
 impl PersistenceManager {
@@ -206,23 +208,30 @@ impl PersistenceManager {
             )",
             [],
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
     }
 
     pub fn queue_telemetry(&self, payload: &TelemetryPayload) -> SqlResult<()> {
         let json = serde_json::to_string(payload).unwrap();
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO telemetry_queue (payload, priority) VALUES (?, ?)",
             params![json, payload.priority],
         )?;
-        info!("QUEUED [P{}]: Telemetry stored in local buffer", payload.priority);
+        info!(
+            "QUEUED [P{}]: Telemetry stored in local buffer",
+            payload.priority
+        );
         Ok(())
     }
 
     pub fn drain_queue(&self) -> SqlResult<Vec<(i32, TelemetryPayload)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, payload FROM telemetry_queue ORDER BY priority DESC, id ASC LIMIT 50")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, payload FROM telemetry_queue ORDER BY priority DESC, id ASC LIMIT 50",
+        )?;
         let rows = stmt.query_map([], |row| {
             let id: i32 = row.get(0)?;
             let payload_str: String = row.get(1)?;
@@ -238,8 +247,8 @@ impl PersistenceManager {
     }
 
     pub fn delete_telemetry(&self, id: i32) -> SqlResult<()> {
-        self.conn
-            .execute("DELETE FROM telemetry_queue WHERE id = ?", params![id])?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM telemetry_queue WHERE id = ?", params![id])?;
         Ok(())
     }
 }
@@ -259,7 +268,10 @@ async fn mesh_listener(
             s
         }
         Err(e) => {
-            warn!("Could not bind mesh listener on port {}: {}", MESH_BROADCAST_PORT, e);
+            warn!(
+                "Could not bind mesh listener on port {}: {}",
+                MESH_BROADCAST_PORT, e
+            );
             return;
         }
     };
@@ -274,7 +286,7 @@ async fn mesh_listener(
                 if let Some(decrypted_json) = decrypt_mesh_packet(&buf[..len]) {
                     if let Ok(payload) = serde_json::from_str::<TelemetryPayload>(&decrypted_json) {
                         let pkt_id = format!("{}:{}", payload.node_id, payload.timestamp);
-                        
+
                         // 1. Deduplicate
                         if recently_relayed.contains(&pkt_id) {
                             continue;
@@ -287,16 +299,21 @@ async fn mesh_listener(
 
                         // 2. Relay if we have cloud connectivity
                         if failures.load(Ordering::SeqCst) < MAX_MQTT_FAILURES {
-                            info!("SWARM RELAY: Proxying data for {} to Control Plane", payload.node_id);
+                            info!(
+                                "SWARM RELAY: Proxying data for {} to Control Plane",
+                                payload.node_id
+                            );
                             let _ = quic_client
                                 .post(format!("{}/telemetry", api_url))
                                 .json(&payload)
                                 .send()
                                 .await;
-                            
+
                             relayed_count.fetch_add(1, Ordering::SeqCst);
                             recently_relayed.push(pkt_id);
-                            if recently_relayed.len() > 100 { recently_relayed.remove(0); }
+                            if recently_relayed.len() > 100 {
+                                recently_relayed.remove(0);
+                            }
                         }
                     }
                 }
@@ -353,15 +370,18 @@ async fn main() {
     let consecutive_failures = Arc::new(AtomicU32::new(0));
 
     // Load TLS Identity for mTLS (per-device cert)
-    let cert_path = std::env::var("MTSN_CLIENT_CERT").unwrap_or_else(|_| format!("certs/{}.crt", node_id));
-    let key_path = std::env::var("MTSN_CLIENT_KEY").unwrap_or_else(|_| format!("certs/{}.key", node_id));
+    let cert_path =
+        std::env::var("MTSN_CLIENT_CERT").unwrap_or_else(|_| format!("certs/{}.crt", node_id));
+    let key_path =
+        std::env::var("MTSN_CLIENT_KEY").unwrap_or_else(|_| format!("certs/{}.key", node_id));
     let ca_path = std::env::var("MTSN_CA_CERT").unwrap_or_else(|_| "certs/ca.crt".to_string());
 
     let client_cert = fs::read(&cert_path).expect("Failed to read client cert");
     let client_key = fs::read(&key_path).expect("Failed to read client key");
     let ca_cert = fs::read(&ca_path).expect("Failed to read CA cert");
 
-    let identity = Identity::from_pem(&[client_cert, client_key].concat()).expect("Failed to create identity");
+    let identity =
+        Identity::from_pem(&[client_cert, client_key].concat()).expect("Failed to create identity");
     let root_ca = Certificate::from_pem(&ca_cert).expect("Failed to load Root CA");
 
     let quic_client = Client::builder()
@@ -372,7 +392,8 @@ async fn main() {
         .build()
         .expect("Failed to build HTTP/3 client");
 
-    let api_url = std::env::var("MTSN_API_URL").unwrap_or_else(|_| "https://localhost:8000".to_string());
+    let api_url =
+        std::env::var("MTSN_API_URL").unwrap_or_else(|_| "https://localhost:8000".to_string());
 
     // Initialize persistence
     let persistence = Arc::new(PersistenceManager::new().expect("Failed to initialize SQLite DB"));
@@ -406,7 +427,13 @@ async fn main() {
     let listener_relayed = relayed_counter.clone();
 
     tokio::spawn(async move {
-        mesh_listener(listener_client, listener_url, listener_fails, listener_relayed).await;
+        mesh_listener(
+            listener_client,
+            listener_url,
+            listener_fails,
+            listener_relayed,
+        )
+        .await;
     });
 
     let mut skip_tick = false;
@@ -432,10 +459,20 @@ async fn main() {
         }
 
         let mut metrics = HashMap::new();
-        metrics.insert("failures".to_string(), consecutive_failures.load(Ordering::SeqCst) as f64);
-        metrics.insert("relays".to_string(), relayed_counter.load(Ordering::SeqCst) as f64);
+        metrics.insert(
+            "failures".to_string(),
+            consecutive_failures.load(Ordering::SeqCst) as f64,
+        );
+        metrics.insert(
+            "relays".to_string(),
+            relayed_counter.load(Ordering::SeqCst) as f64,
+        );
 
-        let priority = if is_jammed || consecutive_failures.load(Ordering::SeqCst) > 0 { 5 } else { 0 };
+        let priority = if is_jammed || consecutive_failures.load(Ordering::SeqCst) > 0 {
+            5
+        } else {
+            0
+        };
 
         let mut payload = TelemetryPayload {
             node_id: node_id.clone(),
@@ -454,7 +491,7 @@ async fn main() {
         // ── Phase 9: Sovereign Audit Signing ──────────────
         let signing_key = get_signing_key(&node_id);
         sign_payload(&mut payload, &signing_key);
-        
+
         let json = match serde_json::to_string(&payload) {
             Ok(j) => j,
             Err(e) => {
@@ -474,15 +511,24 @@ async fn main() {
             Ok(resp) if resp.status().is_success() => {
                 info!(
                     "QUIC PUB: node_id={} uplink={} signal_strength={}% loss={:.1}% lat={:.0}ms",
-                    payload.node_id, payload.uplink, payload.signal_strength,
-                    payload.packet_loss, payload.latency_ms
+                    payload.node_id,
+                    payload.uplink,
+                    payload.signal_strength,
+                    payload.packet_loss,
+                    payload.latency_ms
                 );
                 consecutive_failures.store(0, Ordering::SeqCst);
 
                 // Drain local queue if connected
                 if let Ok(queued_items) = persistence.drain_queue() {
                     for (id, q_payload) in queued_items {
-                        if quic_client.post(format!("{}/telemetry", api_url)).json(&q_payload).send().await.is_ok() {
+                        if quic_client
+                            .post(format!("{}/telemetry", api_url))
+                            .json(&q_payload)
+                            .send()
+                            .await
+                            .is_ok()
+                        {
                             let _ = persistence.delete_telemetry(id);
                         }
                     }
@@ -495,7 +541,7 @@ async fn main() {
             Err(e) => {
                 warn!("QUIC connection failed: {}", e);
                 let _ = persistence.queue_telemetry(&payload);
-                
+
                 let fails = consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
                 if fails >= MAX_MQTT_FAILURES {
                     broadcast_mesh_fallback(&payload);
@@ -505,7 +551,9 @@ async fn main() {
 
         // Also maintain MQTT for Mesh (Peer-to-Peer) coordination
         if mqtt_connected.load(Ordering::SeqCst) {
-            let _ = client.publish(MQTT_TOPIC, QoS::AtMostOnce, false, json.as_bytes()).await;
+            let _ = client
+                .publish(MQTT_TOPIC, QoS::AtMostOnce, false, json.as_bytes())
+                .await;
         }
     }
 }
@@ -519,13 +567,17 @@ mod tests {
     #[test]
     fn test_telemetry_serialisation() {
         let payload = TelemetryPayload {
-            node: "test-node".to_string(),
+            node_id: "test-node".to_string(),
             gps: [12.9716, 77.5946],
             uplink: "satellite".to_string(),
-            signal: 85,
+            signal_strength: 85,
             packet_loss: 2.5,
             latency_ms: 45.0,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            metrics: None,
+            priority: 0,
+            is_jammed: false,
+            signature: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("test-node"));
@@ -536,17 +588,19 @@ mod tests {
     #[test]
     fn test_telemetry_deserialisation() {
         let json = r#"{
-            "node": "drone-1",
+            "node_id": "drone-1",
             "gps": [12.9716, 77.5946],
             "uplink": "satellite",
-            "signal": 85,
+            "signal_strength": 85,
             "packet_loss": 2.5,
             "latency_ms": 45.0,
-            "timestamp": "2026-01-01T00:00:00Z"
+            "timestamp": "2026-01-01T00:00:00Z",
+            "priority": 0,
+            "is_jammed": false
         }"#;
         let payload: TelemetryPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.node, "drone-1");
-        assert_eq!(payload.signal, 85);
+        assert_eq!(payload.node_id, "drone-1");
+        assert_eq!(payload.signal_strength, 85);
         assert_eq!(payload.gps, [12.9716, 77.5946]);
     }
 
