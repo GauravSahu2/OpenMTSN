@@ -17,8 +17,8 @@ export function TimezoneSelector({ mode, onChange }: TimezoneSelectorProps) {
             key={m}
             onClick={() => onChange(m)}
             className={`px-2 py-0.5 rounded-full transition-all ${
-              mode === m 
-                ? "bg-cyan-500 text-black" 
+              mode === m
+                ? "bg-cyan-500 text-black"
                 : "text-dim hover:text-white"
             }`}
           >
@@ -32,18 +32,18 @@ export function TimezoneSelector({ mode, onChange }: TimezoneSelectorProps) {
 
 export function formatTimestamp(ts: string, mode: TimezoneMode): string {
   const date = new Date(ts);
-  
+
   if (mode === "UTC") {
     return date.toISOString().replace("T", " ").substring(0, 19) + "Z";
   }
-  
+
   if (mode === "IST") {
     // IST is UTC + 5:30
     const istOffset = 5.5 * 60 * 60 * 1000;
     const istDate = new Date(date.getTime() + istOffset);
     return istDate.toISOString().replace("T", " ").substring(0, 19) + " IST";
   }
-  
+
   // Local
   return date.toLocaleString();
 }

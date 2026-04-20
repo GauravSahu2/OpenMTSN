@@ -40,7 +40,10 @@ export function useTopologySocket() {
     ws.onclose = () => {
       setConnected(false);
       console.log("[WS] Disconnected — reconnecting...");
-      reconnectTimerRef.current = window.setTimeout(connect, RECONNECT_DELAY_MS);
+      reconnectTimerRef.current = window.setTimeout(
+        connect,
+        RECONNECT_DELAY_MS,
+      );
     };
 
     ws.onerror = (err) => {

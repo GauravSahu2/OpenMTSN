@@ -8,7 +8,12 @@ interface SidebarProps {
   totalDegraded: number;
 }
 
-export function Sidebar({ nodes, connected, totalHealthy, totalDegraded }: SidebarProps) {
+export function Sidebar({
+  nodes,
+  connected,
+  totalHealthy,
+  totalDegraded,
+}: SidebarProps) {
   return (
     <aside className="sidebar">
       {/* Header */}
@@ -42,14 +47,19 @@ export function Sidebar({ nodes, connected, totalHealthy, totalDegraded }: Sideb
       {/* Legend */}
       <div className="legend">
         <h3>Uplink Types</h3>
-        {(Object.entries(UPLINK_VISUALS) as [string, typeof UPLINK_VISUALS["5g"]][]).map(
-          ([key, v]) => (
-            <div key={key} className="legend-item">
-              <span className="legend-dot" style={{ background: v.color }} />
-              <span>{v.icon} {v.label}</span>
-            </div>
-          )
-        )}
+        {(
+          Object.entries(UPLINK_VISUALS) as [
+            string,
+            (typeof UPLINK_VISUALS)["5g"],
+          ][]
+        ).map(([key, v]) => (
+          <div key={key} className="legend-item">
+            <span className="legend-dot" style={{ background: v.color }} />
+            <span>
+              {v.icon} {v.label}
+            </span>
+          </div>
+        ))}
         <div className="legend-item">
           <span className="legend-dot degraded-dot" />
           <span>⚠️ Degraded</span>
@@ -69,7 +79,9 @@ export function Sidebar({ nodes, connected, totalHealthy, totalDegraded }: Sideb
               style={{ borderLeftColor: visual.color }}
             >
               <div className="node-header">
-                <span className="node-name">{visual.icon} {node.node_id}</span>
+                <span className="node-name">
+                  {visual.icon} {node.node_id}
+                </span>
                 <span
                   className="node-uplink-badge"
                   style={{ background: visual.color }}
@@ -82,11 +94,13 @@ export function Sidebar({ nodes, connected, totalHealthy, totalDegraded }: Sideb
                 <span>📉 {node.packet_loss}%</span>
                 <span>⏱ {node.latency_ms}ms</span>
               </div>
-              {node.recommended_route && node.recommended_route !== node.uplink && (
-                <div className="node-failover">
-                  → Failover to <strong>{node.recommended_route.toUpperCase()}</strong>
-                </div>
-              )}
+              {node.recommended_route &&
+                node.recommended_route !== node.uplink && (
+                  <div className="node-failover">
+                    → Failover to{" "}
+                    <strong>{node.recommended_route.toUpperCase()}</strong>
+                  </div>
+                )}
             </div>
           );
         })}
