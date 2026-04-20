@@ -126,13 +126,11 @@ def calculate_optimal_route(
     # Failover trigger uses the EFFECTIVE (averaged) health to check thresholds
     # but hard failures (packet loss > 50%) should still trigger instantly
     is_critical_failure = telemetry_data.packet_loss > 50.0
-    history_threshold = (effective_health < 0.4 or is_critical_failure)
+    history_threshold = effective_health < 0.4 or is_critical_failure
     should_failover = _needs_failover(telemetry_data) if not history else history_threshold
 
     if should_failover:
-        recommended_uplink, reason = _select_best_uplink(
-            telemetry_data.uplink, telemetry_data
-        )
+        recommended_uplink, reason = _select_best_uplink(telemetry_data.uplink, telemetry_data)
         confidence = round(1.0 - effective_health, 4)
         logger.warning(
             "FAILOVER node=%s | %s → %s | health=%.4f (inst=%.4f) | %s",
@@ -158,7 +156,7 @@ def calculate_optimal_route(
         )
 
     # Check for latency warning (informational)
-    lat_warn = (telemetry_data.latency_ms > settings.LATENCY_WARNING_THRESHOLD_MS)
+    lat_warn = telemetry_data.latency_ms > settings.LATENCY_WARNING_THRESHOLD_MS
     if lat_warn and not should_failover:
         reason += f" [WARN: latency {telemetry_data.latency_ms}ms over threshold]"
 

@@ -39,11 +39,10 @@ from app.routing_engine import calculate_optimal_route, compute_health_score
 
 # ── Structured Logging Configuration ──────────────────────
 
+
 def setup_logging():
     log_handler = logging.StreamHandler()
-    formatter = jsonlogger.JsonFormatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
+    formatter = jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     log_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
@@ -52,6 +51,7 @@ def setup_logging():
         root_logger.removeHandler(handler)
     root_logger.addHandler(log_handler)
     root_logger.setLevel(getattr(logging, settings.LOG_LEVEL))
+
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -69,6 +69,7 @@ MTSN_NODE_RELAYS = Gauge(
 _store: RedisTopologyStore | None = None
 _ws_clients: set[WebSocket] = set()
 
+
 def get_store() -> RedisTopologyStore:
     if _store is None:
         raise RuntimeError("RedisTopologyStore not initialised")
@@ -76,7 +77,7 @@ def get_store() -> RedisTopologyStore:
 
 
 async def get_client_identity_and_key(
-    request: Request
+    request: Request,
 ) -> tuple[str, ed25519.Ed25519PublicKey | None]:
     """Extract X.509 Common Name (CN) and Public Key from the clientcert."""
     if not settings.MTLS_REQUIRED:
@@ -102,7 +103,7 @@ async def get_client_identity_and_key(
     if not binary_cert:
         print(f"!!! MTLS FAILURE !!! Cert not found. Keys: {list(request.scope.keys())}")
         if settings.MTLS_REQUIRED:
-             return "anonymous_fallback", None
+            return "anonymous_fallback", None
         return "anonymous", None
 
     cert = x509.load_der_x509_certificate(binary_cert, default_backend())
@@ -123,6 +124,7 @@ async def get_client_identity_and_key(
 
     return cn, pub_key
 
+
 # ── Lifespan ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -132,6 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Control Plane SRE Stack online", extra={"prom": "enabled"})
     yield
     await pool.aclose()
+
 
 # ── App factory ───────────────────────────────────────────
 app = FastAPI(title=settings.APP_TITLE, version="0.3.0-PRO", lifespan=lifespan)
@@ -160,11 +163,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": exc.errors(), "body": exc.body},
     )
 
+
 @app.get("/health")
 async def health_check() -> dict:
     store = get_store()
     redis_ok = await store.ping()
     return {"status": "ok" if redis_ok else "degraded", "redis": redis_ok}
+
 
 @app.post("/telemetry", response_model=RouteDecision, status_code=201)
 async def ingest_telemetry(
@@ -267,6 +272,7 @@ async def get_route_for_node(node_id: str) -> RouteDecision:
 
 
 # ── WebSocket endpoint ───────────────────────────────────
+
 
 @app.websocket("/ws/topology")
 async def websocket_topology(ws: WebSocket) -> None:

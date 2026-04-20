@@ -17,6 +17,7 @@ from app.routing_engine import (
 #  Health Score Tests
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class TestHealthScore:
     """Validate the composite health score computation."""
 
@@ -88,6 +89,7 @@ class TestHealthScore:
 #  Failover Threshold Tests
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class TestFailoverThresholds:
     """Validate the hard threshold triggers for failover."""
 
@@ -150,6 +152,7 @@ class TestFailoverThresholds:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Full Routing Decision Tests
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 class TestCalculateOptimalRoute:
     """End-to-end routing decision tests."""

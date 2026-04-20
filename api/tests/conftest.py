@@ -44,6 +44,7 @@ async def test_client(fake_redis, monkeypatch):
 
 # ── Reusable telemetry fixtures ───────────────────────────
 
+
 @pytest.fixture
 def healthy_5g_telemetry() -> TelemetryPayload:
     """A healthy 5G node — should NOT trigger failover."""
